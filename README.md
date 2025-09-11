@@ -1,6 +1,6 @@
 # 🌍 TravelPro - Tours y Vuelos
 
-Una página web moderna y responsiva para promociones de tours, vuelos y programa de afiliados, con formulario de contacto completo.
+Una página web dinámica en PHP, moderna y responsiva para promociones de tours, vuelos y programa de afiliados, con formularios funcionales y procesamiento de datos.
 
 ## 🚀 Características
 
@@ -23,6 +23,7 @@ Una página web moderna y responsiva para promociones de tours, vuelos y program
 - **Imágenes de alta calidad** de Unsplash
 
 ### 💻 Tecnologías
+- **PHP** para procesamiento del lado del servidor
 - **HTML5** semántico y accesible
 - **CSS3** con Flexbox y Grid Layout
 - **JavaScript ES6+** modular y moderno
@@ -32,8 +33,8 @@ Una página web moderna y responsiva para promociones de tours, vuelos y program
 ## 📁 Estructura del Proyecto
 
 ```
-pagina-web/
-├── index.html          # Página principal
+websiteWorldwideTravel/
+├── index.php           # Página principal en PHP
 ├── styles.css          # Estilos CSS
 ├── script.js           # JavaScript interactivo
 └── README.md           # Este archivo
@@ -41,23 +42,25 @@ pagina-web/
 
 ## 🛠️ Instalación y Uso
 
-### Opción 1: Abrir directamente
-1. Descarga o clona el proyecto
-2. Abre `index.html` en tu navegador
+### Requisitos
+- PHP 7.4 o superior
+- Servidor web (Apache, Nginx) o servidor PHP integrado
 
-### Opción 2: Servidor local (Recomendado)
+### Opción 1: Servidor PHP integrado
 ```bash
 # Navega al directorio del proyecto
-cd "pagina web"
+cd websiteWorldwideTravel
 
-# Inicia un servidor local con Python
-python -m http.server 8000
+# Inicia el servidor PHP integrado
+php -S localhost:8080
 
-# O con Node.js
-npx http-server -p 8000
-
-# Visita http://localhost:8000 en tu navegador
+# Visita http://localhost:8080 en tu navegador
 ```
+
+### Opción 2: Servidor web tradicional
+1. Coloca los archivos en tu directorio web (htdocs, www, etc.)
+2. Configura tu servidor web para servir PHP
+3. Accede a través de la URL correspondiente
 
 ## 📱 Responsive Design
 
@@ -86,10 +89,10 @@ La página está optimizada para todos los dispositivos:
 - Animación de pulsación
 
 ### 📋 Formularios
-- **Contacto**: Validación completa y envío
-- **Afiliados**: Registro con campos específicos
+- **Contacto**: Validación completa y procesamiento con PHP
+- **Afiliados**: Registro con campos específicos y manejo de datos
 - **Newsletter**: Suscripción con validación de email
-- **Búsqueda**: Tours y vuelos con filtros
+- **Búsqueda**: Tours y vuelos con filtros dinámicos
 
 ## 🎨 Secciones de la Página
 
@@ -141,9 +144,10 @@ Los colores principales se pueden modificar en `styles.css`:
 ```
 
 ### Contenido
-- Modifica el texto en `index.html`
+- Modifica el texto y variables en `index.php`
+- Actualiza los arrays de datos para tours y vuelos
 - Cambia las imágenes actualizando las URLs
-- Ajusta los precios y ofertas en las tarjetas
+- Ajusta los precios y ofertas en las estructuras de datos PHP
 
 ### Estilos
 - Responsive breakpoints en `styles.css`
@@ -197,6 +201,8 @@ Los colores principales se pueden modificar en `styles.css`:
 - [ ] Integración con APIs reales de vuelos
 - [ ] Sistema de reservas funcional
 - [ ] Panel de administración para afiliados
+- [ ] Base de datos MySQL para almacenar información
+- [ ] Sistema de autenticación de usuarios
 - [ ] Chat en vivo
 - [ ] Múltiples idiomas
 - [ ] PWA (Progressive Web App)
