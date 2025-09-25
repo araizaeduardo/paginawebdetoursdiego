@@ -270,15 +270,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $apiResp = amadeus_search_flights($origin, $destination, $departure, $return, $adults);
                     $mapped = map_amadeus_offers_to_flights($apiResp);
                     if (empty($mapped)) {
-                        // Marcar en sesión que la última búsqueda quedó vacía y no mostrar sección de vuelos
-                        $_SESSION['last_search_was_empty'] = true;
-                        $GLOBALS['flights'] = [];
                         $formMessage = 'No encontramos ofertas para tu búsqueda. Intenta con otras fechas o destinos.';
                         $formMessageType = 'info';
                     } else {
-                        // Sobrescribir $flights y limpiar el flag de vacío
+                        // Sobrescribir $flights global más abajo (usaremos variable global luego de definirla)
                         $GLOBALS['flights'] = $mapped;
-                        $_SESSION['last_search_was_empty'] = false;
                         $formMessage = 'Mostrando resultados en tiempo real de Amadeus.';
                         $formMessageType = 'success';
                     }
@@ -333,11 +329,51 @@ $tours = [
     ]
 ];
 
-// Datos para vuelos (por defecto) solo si NO venimos de una búsqueda vacía
-$suppressDefaults = (isset($_SESSION['last_search_was_empty']) && $_SESSION['last_search_was_empty'] === true);
-if ((!isset($flights) || !is_array($flights) || empty($flights)) && !$suppressDefaults) {
+// Datos para vuelos (por defecto, si no hay resultados de Amadeus)
+if (!isset($flights) || !is_array($flights) || empty($flights)) {
 $flights = [
-    
+    [
+        'id' => 1,
+        'airline' => 'Avianca',
+        'airline_logo' => 'https://logos-world.net/wp-content/uploads/2023/01/Avianca-Logo.png',
+        'departure_time' => '08:30',
+        'departure_airport' => 'BOG',
+        'arrival_time' => '11:00',
+        'arrival_airport' => 'MDE',
+        'duration' => '2h 30m',
+        'stops' => 0,
+        'old_price' => null,
+        'price' => 180,
+        'featured' => false
+    ],
+    [
+        'id' => 2,
+        'airline' => 'LATAM',
+        'airline_logo' => 'https://logoeps.com/wp-content/uploads/2013/03/latam-vector-logo.png',
+        'departure_time' => '14:15',
+        'departure_airport' => 'BOG',
+        'arrival_time' => '23:00',
+        'arrival_airport' => 'MIA',
+        'duration' => '8h 45m',
+        'stops' => 1,
+        'old_price' => 650,
+        'price' => 480,
+        'featured' => true
+    ],
+    [
+        'id' => 3,
+        'airline' => 'American Airlines',
+        'airline_logo' => 'https://1000logos.net/wp-content/uploads/2019/05/American-Airlines-Logo.png',
+        'departure_time' => '06:45',
+        'departure_airport' => 'MIA',
+        'arrival_time' => '10:05',
+        'arrival_airport' => 'JFK',
+        'duration' => '3h 20m',
+        'stops' => 0,
+        'old_price' => null,
+        'price' => 320,
+        'featured' => false
+    ]
 ];
 }
 ?>
