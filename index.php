@@ -6,6 +6,209 @@ session_start();
 $siteName = "TravelPro";
 $siteTagline = "Tours y Vuelos";
 
+// ==========================
+// Amadeus API: utilidades
+// ==========================
+// Las credenciales se leen desde variables de entorno para evitar exponerlas en el repositorio.
+// Exporte antes de iniciar el servidor PHP:
+//   export AMADEUS_API_KEY=... && export AMADEUS_API_SECRET=...
+// Servidor de pruebas: https://test.api.amadeus.com
+// Cargar variables desde .env si existe
+function load_env($path)
+{
+    if (!is_file($path) || !is_readable($path)) return;
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    foreach ($lines as $line) {
+        if (strpos(ltrim($line), '#') === 0) continue;
+        if (!str_contains($line, '=')) continue;
+        list($k, $v) = array_map('trim', explode('=', $line, 2));
+        // Quitar comillas envolventes si las hay
+        if ((str_starts_with($v, '"') && str_ends_with($v, '"')) || (str_starts_with($v, "'") && str_ends_with($v, "'"))) {
+            $v = substr($v, 1, -1);
+        }
+        putenv("$k=$v");
+        $_ENV[$k] = $v;
+    }
+}
+
+load_env(__DIR__ . '/.env');
+
+define('AMADEUS_BASE_URL', getenv('AMADEUS_BASE_URL') ?: 'https://test.api.amadeus.com');
+
+function amadeus_get_credentials() {
+    $key = getenv('AMADEUS_API_KEY') ?: '';
+    $secret = getenv('AMADEUS_API_SECRET') ?: '';
+    return [$key, $secret];
+}
+
+function amadeus_get_token() {
+    // Reusar token si está vigente
+    if (!empty($_SESSION['amadeus_token']) && !empty($_SESSION['amadeus_token_expires']) && time() < $_SESSION['amadeus_token_expires']) {
+        return $_SESSION['amadeus_token'];
+    }
+
+    list($clientId, $clientSecret) = amadeus_get_credentials();
+    if (empty($clientId) || empty($clientSecret)) {
+        throw new Exception('Faltan credenciales de Amadeus. Configure AMADEUS_API_KEY y AMADEUS_API_SECRET.');
+    }
+
+    if (!function_exists('curl_init')) {
+        throw new Exception('La extensión PHP cURL no está habilitada. Instala php8.3-curl (o equivalente) y reinicia el servidor.');
+    }
+    $url = AMADEUS_BASE_URL . '/v1/security/oauth2/token';
+    $postFields = http_build_query([
+        'grant_type' => 'client_credentials',
+        'client_id' => $clientId,
+        'client_secret' => $clientSecret,
+    ]);
+
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => $postFields,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/x-www-form-urlencoded'],
+        CURLOPT_TIMEOUT => 20,
+    ]);
+    $resp = curl_exec($ch);
+    if ($resp === false) {
+        $err = curl_error($ch);
+        curl_close($ch);
+        throw new Exception('Error al obtener token de Amadeus: ' . $err);
+    }
+    $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+    $data = json_decode($resp, true);
+    if ($status < 200 || $status >= 300 || empty($data['access_token'])) {
+        $msg = isset($data['error_description']) ? $data['error_description'] : 'Respuesta inválida del servidor de autorización';
+        throw new Exception('No se pudo obtener token de Amadeus (' . $status . '): ' . $msg);
+    }
+
+    $_SESSION['amadeus_token'] = $data['access_token'];
+    // Guardar expiración (ahora + expires_in - un margen de 60s)
+    $expiresIn = isset($data['expires_in']) ? (int)$data['expires_in'] : 1700;
+    $_SESSION['amadeus_token_expires'] = time() + max(60, $expiresIn - 60);
+    return $_SESSION['amadeus_token'];
+}
+
+function amadeus_search_flights($origin, $destination, $departureDate, $returnDate = null, $adults = 1, $currency = 'USD', $max = 10) {
+    if (!function_exists('curl_init')) {
+        throw new Exception('La extensión PHP cURL no está habilitada. Instala php8.3-curl (o equivalente) y reinicia el servidor.');
+    }
+    $token = amadeus_get_token();
+    $params = [
+        'originLocationCode' => strtoupper($origin),
+        'destinationLocationCode' => strtoupper($destination),
+        'departureDate' => $departureDate,
+        'adults' => $adults,
+        'currencyCode' => $currency,
+        'max' => $max,
+    ];
+    if (!empty($returnDate)) {
+        $params['returnDate'] = $returnDate;
+    }
+
+    $url = AMADEUS_BASE_URL . '/v2/shopping/flight-offers?' . http_build_query($params);
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            'Authorization: Bearer ' . $token,
+            'Accept: application/json',
+        ],
+        CURLOPT_TIMEOUT => 30,
+    ]);
+    $resp = curl_exec($ch);
+    if ($resp === false) {
+        $err = curl_error($ch);
+        curl_close($ch);
+        throw new Exception('Error al consultar vuelos: ' . $err);
+    }
+    $status = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+    $data = json_decode($resp, true);
+    if ($status < 200 || $status >= 300) {
+        $msg = isset($data['errors'][0]['detail']) ? $data['errors'][0]['detail'] : 'Error en la API de Amadeus';
+        throw new Exception('Consulta de vuelos falló (' . $status . '): ' . $msg);
+    }
+    return $data;
+}
+
+function iso8601_duration_to_text($duration) {
+    // Ejemplo: PT8H45M -> 8h 45m
+    if (!is_string($duration)) return '';
+    $hours = 0; $minutes = 0;
+    if (preg_match('/PT(?:(\d+)H)?(?:(\d+)M)?/i', $duration, $m)) {
+        $hours = isset($m[1]) ? (int)$m[1] : 0;
+        $minutes = isset($m[2]) ? (int)$m[2] : 0;
+    }
+    $parts = [];
+    if ($hours > 0) $parts[] = $hours . 'h';
+    if ($minutes > 0) $parts[] = $minutes . 'm';
+    return trim(implode(' ', $parts));
+}
+
+function map_amadeus_offers_to_flights($apiResponse) {
+    $flights = [];
+    if (empty($apiResponse['data'])) return $flights;
+    $carriers = isset($apiResponse['dictionaries']['carriers']) ? $apiResponse['dictionaries']['carriers'] : [];
+
+    $id = 1;
+    foreach ($apiResponse['data'] as $offer) {
+        // Tomar el primer itinerario como base para mostrar
+        $itineraries = $offer['itineraries'] ?? [];
+        if (empty($itineraries)) continue;
+        $firstIt = $itineraries[0];
+        $segments = $firstIt['segments'] ?? [];
+        if (empty($segments)) continue;
+
+        $firstSeg = $segments[0];
+        $lastSeg = $segments[count($segments) - 1];
+        $carrierCode = $firstSeg['carrierCode'] ?? '';
+        $airlineName = isset($carriers[$carrierCode]) ? $carriers[$carrierCode] : $carrierCode;
+
+        $departureAt = $firstSeg['departure']['at'] ?? '';
+        $arrivalAt = $lastSeg['arrival']['at'] ?? '';
+        $departureTime = $departureAt ? date('H:i', strtotime($departureAt)) : '';
+        $arrivalTime = $arrivalAt ? date('H:i', strtotime($arrivalAt)) : '';
+
+        $duration = iso8601_duration_to_text($firstIt['duration'] ?? '');
+        $stops = max(0, count($segments) - 1);
+
+        $price = isset($offer['price']['total']) ? (float)$offer['price']['total'] : 0.0;
+
+        $flights[] = [
+            'id' => $id++,
+            'airline' => $airlineName ?: '—',
+            'airline_logo' => 'https://via.placeholder.com/80x24?text=' . urlencode($carrierCode ?: 'AIR'),
+            'departure_time' => $departureTime,
+            'departure_airport' => $firstSeg['departure']['iataCode'] ?? '',
+            'arrival_time' => $arrivalTime,
+            'arrival_airport' => $lastSeg['arrival']['iataCode'] ?? '',
+            'duration' => $duration,
+            'stops' => $stops,
+            'old_price' => null,
+            'price' => $price,
+            'featured' => false,
+        ];
+    }
+
+    // Marcar como destacado el de menor precio
+    if (!empty($flights)) {
+        $minIndex = 0;
+        $minPrice = $flights[0]['price'];
+        foreach ($flights as $i => $f) {
+            if ($f['price'] < $minPrice) {
+                $minPrice = $f['price'];
+                $minIndex = $i;
+            }
+        }
+        $flights[$minIndex]['featured'] = true;
+    }
+
+    return $flights;
+}
+
 // Función para mostrar mensajes de alerta
 function showAlert($message, $type = 'success') {
     if(isset($message)) {
@@ -33,9 +236,56 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $formMessage = "¡Suscripción exitosa! Recibirás nuestras mejores ofertas.";
                 break;
             case 'flight_search':
-                // Procesar búsqueda de vuelos
-                $formMessage = "Búsqueda realizada. Mostrando resultados disponibles.";
-                $formMessageType = 'info';
+                // Procesar búsqueda de vuelos con Amadeus
+                $origin = isset($_POST['origen']) ? trim($_POST['origen']) : '';
+                $destination = isset($_POST['destino']) ? trim($_POST['destino']) : '';
+                $departure = isset($_POST['fechaIda']) ? trim($_POST['fechaIda']) : '';
+                $return = isset($_POST['fechaVuelta']) ? trim($_POST['fechaVuelta']) : '';
+                $flightType = isset($_POST['flight_type']) ? $_POST['flight_type'] : 'round_trip';
+                // Persistir selección de tipo de viaje
+                $_SESSION['last_flight_type'] = $flightType;
+                if ($flightType === 'one_way') {
+                    // Ignorar fecha de regreso en modo solo ida
+                    $return = '';
+                }
+
+                // Validaciones básicas (se espera código IATA de 3 letras)
+                if (!preg_match('/^[A-Za-z]{3}$/', $origin) || !preg_match('/^[A-Za-z]{3}$/', $destination)) {
+                    $formMessage = 'Por favor ingresa códigos IATA válidos (ej. BOG, MIA).';
+                    $formMessageType = 'warning';
+                    break;
+                }
+                if (empty($departure)) {
+                    $formMessage = 'La fecha de ida es obligatoria.';
+                    $formMessageType = 'warning';
+                    break;
+                }
+
+                // Número de personas (adultos)
+                $adults = isset($_POST['personas']) ? (int)$_POST['personas'] : 1;
+                if ($adults < 1) $adults = 1;
+                if ($adults > 9) $adults = 9; // límite típico
+
+                try {
+                    $apiResp = amadeus_search_flights($origin, $destination, $departure, $return, $adults);
+                    $mapped = map_amadeus_offers_to_flights($apiResp);
+                    if (empty($mapped)) {
+                        // Marcar en sesión que la última búsqueda quedó vacía y no mostrar sección de vuelos
+                        $_SESSION['last_search_was_empty'] = true;
+                        $GLOBALS['flights'] = [];
+                        $formMessage = 'No encontramos ofertas para tu búsqueda. Intenta con otras fechas o destinos.';
+                        $formMessageType = 'info';
+                    } else {
+                        // Sobrescribir $flights y limpiar el flag de vacío
+                        $GLOBALS['flights'] = $mapped;
+                        $_SESSION['last_search_was_empty'] = false;
+                        $formMessage = 'Mostrando resultados en tiempo real de Amadeus.';
+                        $formMessageType = 'success';
+                    }
+                } catch (Exception $e) {
+                    $formMessage = 'Error al buscar vuelos: ' . htmlspecialchars($e->getMessage());
+                    $formMessageType = 'error';
+                }
                 break;
             case 'tour_search':
                 // Procesar búsqueda de tours
@@ -83,51 +333,13 @@ $tours = [
     ]
 ];
 
-// Datos para vuelos
+// Datos para vuelos (por defecto) solo si NO venimos de una búsqueda vacía
+$suppressDefaults = (isset($_SESSION['last_search_was_empty']) && $_SESSION['last_search_was_empty'] === true);
+if ((!isset($flights) || !is_array($flights) || empty($flights)) && !$suppressDefaults) {
 $flights = [
-    [
-        'id' => 1,
-        'airline' => 'Avianca',
-        'airline_logo' => 'https://logos-world.net/wp-content/uploads/2023/01/Avianca-Logo.png',
-        'departure_time' => '08:30',
-        'departure_airport' => 'BOG',
-        'arrival_time' => '11:00',
-        'arrival_airport' => 'MDE',
-        'duration' => '2h 30m',
-        'stops' => 0,
-        'old_price' => null,
-        'price' => 180,
-        'featured' => false
-    ],
-    [
-        'id' => 2,
-        'airline' => 'LATAM',
-        'airline_logo' => 'https://logoeps.com/wp-content/uploads/2013/03/latam-vector-logo.png',
-        'departure_time' => '14:15',
-        'departure_airport' => 'BOG',
-        'arrival_time' => '23:00',
-        'arrival_airport' => 'MIA',
-        'duration' => '8h 45m',
-        'stops' => 1,
-        'old_price' => 650,
-        'price' => 480,
-        'featured' => true
-    ],
-    [
-        'id' => 3,
-        'airline' => 'American Airlines',
-        'airline_logo' => 'https://1000logos.net/wp-content/uploads/2019/05/American-Airlines-Logo.png',
-        'departure_time' => '06:45',
-        'departure_airport' => 'MIA',
-        'arrival_time' => '10:05',
-        'arrival_airport' => 'JFK',
-        'duration' => '3h 20m',
-        'stops' => 0,
-        'old_price' => null,
-        'price' => 320,
-        'featured' => false
-    ]
+    
 ];
+}
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -221,6 +433,32 @@ $flights = [
                 <div class="alert alert-<?php echo $formMessageType; ?>">
                     <?php echo $formMessage; ?>
                 </div>
+
+                <?php if ($totalPages > 1): ?>
+                <div class="pagination" style="display:flex;gap:6px;justify-content:center;align-items:center;margin-top:16px;flex-wrap:wrap;">
+                    <?php
+                        // Botón "Anterior"
+                        if ($page > 1) {
+                            $q = $queryParams; $q['page'] = $page - 1;
+                            $url = $basePath . '?' . http_build_query($q) . '#flights';
+                            echo '<a class="btn btn-secondary btn-small" href="' . htmlspecialchars($url) . '">Anterior</a>';
+                        }
+                        // Números de página
+                        for ($p = 1; $p <= $totalPages; $p++) {
+                            $q = $queryParams; $q['page'] = $p;
+                            $url = $basePath . '?' . http_build_query($q) . '#flights';
+                            $active = ($p === $page) ? ' style="font-weight:600;pointer-events:none;opacity:.7;"' : '';
+                            echo '<a class="btn btn-primary btn-small"' . $active . ' href="' . htmlspecialchars($url) . '">' . $p . '</a>';
+                        }
+                        // Botón "Siguiente"
+                        if ($page < $totalPages) {
+                            $q = $queryParams; $q['page'] = $page + 1;
+                            $url = $basePath . '?' . http_build_query($q) . '#flights';
+                            echo '<a class="btn btn-secondary btn-small" href="' . htmlspecialchars($url) . '">Siguiente</a>';
+                        }
+                    ?>
+                </div>
+                <?php endif; ?>
             <?php endif; ?>
             <h1 class="hero-title">Descubre el Mundo</h1>
             <p class="hero-subtitle">Los mejores tours y vuelos con promociones increíbles</p>
@@ -234,29 +472,77 @@ $flights = [
                 <button class="tab-btn active" data-tab="flights">Vuelos</button>
                 <button class="tab-btn" data-tab="tours">Tours</button>
             </div>
+            <?php $lastFlightType = isset($_SESSION['last_flight_type']) ? $_SESSION['last_flight_type'] : 'round_trip'; ?>
             <div class="search-content">
                 <div class="search-form active" id="flights-search">
                     <form method="POST" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>#flights">
                         <input type="hidden" name="form_type" value="flight_search">
                         <div class="form-row">
                             <div class="form-group">
+                                <label>Tipo de viaje</label>
+                                <div class="radio-group">
+                                    <label style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;cursor:pointer;">
+                                        <input type="radio" name="flight_type" value="round_trip" <?php echo ($lastFlightType === 'round_trip') ? 'checked' : ''; ?>>
+                                        <span>Ida y vuelta</span>
+                                    </label>
+                                    <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+                                        <input type="radio" name="flight_type" value="one_way" <?php echo ($lastFlightType === 'one_way') ? 'checked' : ''; ?>>
+                                        <span>Solo ida</span>
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="form-group">
                                 <label>Origen</label>
-                                <input type="text" name="origen" placeholder="Ciudad de origen" required>
+                                <input type="text" name="origen" placeholder="Código IATA (ej. LAX)" list="airports-list" value="LAX" required>
                             </div>
                             <div class="form-group">
                                 <label>Destino</label>
-                                <input type="text" name="destino" placeholder="Ciudad de destino" required>
+                                <input type="text" name="destino" placeholder="Código IATA (ej. GDL)" list="airports-list" value="GDL" required>
                             </div>
                             <div class="form-group">
                                 <label>Fecha ida</label>
                                 <input type="date" name="fechaIda" required>
                             </div>
-                            <div class="form-group">
+                            <div class="form-group" id="return-date-group">
                                 <label>Fecha vuelta</label>
                                 <input type="date" name="fechaVuelta">
                             </div>
+                            <div class="form-group">
+                                <label>Personas</label>
+                                <input type="number" name="personas" min="1" max="9" value="1" required>
+                            </div>
                             <button type="submit" class="btn btn-search">Buscar Vuelos</button>
                         </div>
+                        <!-- Datalist compartido para autocompletar aeropuertos/ciudades -->
+                        <datalist id="airports-list">
+                            <option value="LAX">Los Angeles (LAX) - United States</option>
+                            <option value="GDL">Guadalajara (GDL) - Mexico</option>
+                            <option value="MEX">Ciudad de México (MEX) - Mexico</option>
+                            <option value="CUN">Cancún (CUN) - Mexico</option>
+                            <option value="GUA">Guatemala City (GUA) - Guatemala</option>
+                            <option value="SJO">San José (SJO) - Costa Rica</option>
+                            <option value="BOG">Bogotá (BOG) - Colombia</option>
+                            <option value="MDE">Medellín (MDE) - Colombia</option>
+                            <option value="CLO">Cali (CLO) - Colombia</option>
+                            <option value="CTG">Cartagena (CTG) - Colombia</option>
+                            <option value="MIA">Miami (MIA) - United States</option>
+                            <option value="JFK">New York (JFK) - United States</option>
+                            <option value="SFO">San Francisco (SFO) - United States</option>
+                            <option value="ORD">Chicago (ORD) - United States</option>
+                            <option value="DFW">Dallas (DFW) - United States</option>
+                            <option value="MAD">Madrid (MAD) - Spain</option>
+                            <option value="BCN">Barcelona (BCN) - Spain</option>
+                            <option value="CDG">Paris (CDG) - France</option>
+                            <option value="FRA">Frankfurt (FRA) - Germany</option>
+                            <option value="LHR">London (LHR) - United Kingdom</option>
+                            <option value="UIO">Quito (UIO) - Ecuador</option>
+                            <option value="GYE">Guayaquil (GYE) - Ecuador</option>
+                            <option value="LIM">Lima (LIM) - Peru</option>
+                            <option value="SCL">Santiago (SCL) - Chile</option>
+                            <option value="EZE">Buenos Aires (EZE) - Argentina</option>
+                            <option value="GRU">São Paulo (GRU) - Brazil</option>
+                            <option value="PTY">Panamá (PTY) - Panama</option>
+                        </datalist>
                     </form>
                 </div>
                 <div class="search-form" id="tours-search">
@@ -347,13 +633,14 @@ $flights = [
             <div class="flights-container">
                 <div class="flight-filters">
                     <h3>Filtrar por:</h3>
+                    <?php $defaultFilterFlightType = isset($_GET['flight_type']) ? $_GET['flight_type'] : (isset($_SESSION['last_flight_type']) ? $_SESSION['last_flight_type'] : 'round_trip'); ?>
                     <form method="GET" action="<?php echo htmlspecialchars($_SERVER['PHP_SELF']); ?>#flights">
                         <div class="filter-group">
                             <label>Tipo de vuelo:</label>
                             <select class="filter-select" name="flight_type">
-                                <option value="round_trip" <?php echo isset($_GET['flight_type']) && $_GET['flight_type'] == 'round_trip' ? 'selected' : ''; ?>>Ida y vuelta</option>
-                                <option value="one_way" <?php echo isset($_GET['flight_type']) && $_GET['flight_type'] == 'one_way' ? 'selected' : ''; ?>>Solo ida</option>
-                                <option value="multi_city" <?php echo isset($_GET['flight_type']) && $_GET['flight_type'] == 'multi_city' ? 'selected' : ''; ?>>Multidestino</option>
+                                <option value="round_trip" <?php echo ($defaultFilterFlightType == 'round_trip') ? 'selected' : ''; ?>>Ida y vuelta</option>
+                                <option value="one_way" <?php echo ($defaultFilterFlightType == 'one_way') ? 'selected' : ''; ?>>Solo ida</option>
+                                <option value="multi_city" <?php echo ($defaultFilterFlightType == 'multi_city') ? 'selected' : ''; ?>>Multidestino</option>
                             </select>
                         </div>
                         <div class="filter-group">
@@ -385,8 +672,24 @@ $flights = [
                     </form>
                 </div>
 
+                <?php
+                    // Paginación de vuelos (5 por página)
+                    $perPage = 5;
+                    $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+                    if ($page < 1) { $page = 1; }
+                    $totalFlights = is_array($flights) ? count($flights) : 0;
+                    $totalPages = max(1, (int)ceil($totalFlights / $perPage));
+                    if ($page > $totalPages) { $page = $totalPages; }
+                    $startIndex = ($page - 1) * $perPage;
+                    $pagedFlights = array_slice($flights, $startIndex, $perPage);
+
+                    // Construir base de query preservando filtros actuales
+                    $queryParams = $_GET;
+                    unset($queryParams['page']);
+                    $basePath = htmlspecialchars($_SERVER['PHP_SELF']);
+                ?>
                 <div class="flights-list">
-                    <?php foreach ($flights as $flight): ?>
+                    <?php foreach ($pagedFlights as $flight): ?>
                     <div class="flight-card <?php echo $flight['featured'] ? 'featured' : ''; ?>">
                         <?php if ($flight['featured']): ?>
                         <div class="flight-badge">Mejor Precio</div>
@@ -653,6 +956,105 @@ $flights = [
         <i class="fas fa-arrow-up"></i>
     </button>
 
+    <script>
+    (function(){
+        const form = document.querySelector('#flights-search form');
+        if (!form) return;
+        const originInput = form.querySelector('input[name="origen"]');
+        const destInput = form.querySelector('input[name="destino"]');
+        const datalist = document.getElementById('airports-list');
+        const radioRound = form.querySelector('input[name="flight_type"][value="round_trip"]');
+        const radioOne = form.querySelector('input[name="flight_type"][value="one_way"]');
+        const returnGroup = document.getElementById('return-date-group');
+        const returnInput = form.querySelector('input[name="fechaVuelta"]');
+
+        function normalizeIATA(input){
+            if (!input) return;
+            let v = (input.value || '').trim();
+            // Si el usuario eligió del datalist con formato "Ciudad (XXX)", extraer el código.
+            const inParens = v.match(/\(([A-Za-z]{3})\)/);
+            if (inParens) {
+                v = inParens[1];
+            } else {
+                // O si escribió texto, intenta capturar un código de 3 letras aislado.
+                const m = v.match(/\b([A-Za-z]{3})\b/);
+                if (m) v = m[1];
+            }
+            input.value = v.toUpperCase();
+        }
+
+        // Autocompletado dinámico con debounce
+        let debounceTimer = null;
+        function fetchSuggestions(q){
+            if (!q || q.length < 2) return;
+            fetch('locations.php?q=' + encodeURIComponent(q))
+                .then(r => r.ok ? r.json() : [])
+                .then(list => {
+                    if (!Array.isArray(list)) return;
+                    // Mantener algunas opciones fijas por defecto
+                    const fixed = [
+                        {code:'LAX', label:'Los Angeles (LAX) - United States'},
+                        {code:'GDL', label:'Guadalajara (GDL) - Mexico'}
+                    ];
+                    const options = new Map();
+                    fixed.forEach(i => options.set(i.code, i.label));
+                    list.forEach(item => {
+                        if (item && item.code) {
+                            options.set(item.code.toUpperCase(), item.label || item.code.toUpperCase());
+                        }
+                    });
+                    // Renderizar
+                    if (datalist) {
+                        datalist.innerHTML = '';
+                        options.forEach((label, code) => {
+                            const opt = document.createElement('option');
+                            opt.value = code;
+                            opt.textContent = label;
+                            datalist.appendChild(opt);
+                        });
+                    }
+                })
+                .catch(() => {/* silenciar errores de red en UI */});
+        }
+
+        function onInput(e){
+            const q = e.target.value.trim();
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => fetchSuggestions(q), 250);
+        }
+        originInput && originInput.addEventListener('input', onInput);
+        destInput && destInput.addEventListener('input', onInput);
+
+        // Mostrar/ocultar fecha de regreso según tipo de viaje
+        function syncReturnVisibility(){
+            const isOneWay = radioOne && radioOne.checked;
+            if (returnGroup) {
+                returnGroup.style.display = isOneWay ? 'none' : '';
+            }
+            if (returnInput) {
+                if (isOneWay) {
+                    returnInput.value = '';
+                    returnInput.removeAttribute('required');
+                    returnInput.setAttribute('disabled', 'disabled');
+                } else {
+                    returnInput.removeAttribute('disabled');
+                    // opcional: dejar sin required para permitir búsquedas flexibles; si quieres required, descomenta
+                    // returnInput.setAttribute('required', 'required');
+                }
+            }
+        }
+        if (radioRound) radioRound.addEventListener('change', syncReturnVisibility);
+        if (radioOne) radioOne.addEventListener('change', syncReturnVisibility);
+        // Inicializar estado al cargar
+        syncReturnVisibility();
+
+        // Normalizar antes de enviar
+        form.addEventListener('submit', function(){
+            normalizeIATA(originInput);
+            normalizeIATA(destInput);
+        });
+    })();
+    </script>
     <script src="script.js"></script>
 </body>
 </html>
